@@ -4,10 +4,10 @@
     <div class="w-64 bg-gray-900 p-4 flex flex-col gap-3 border-r border-gray-800 overflow-y-auto">
       <h1 class="text-lg font-bold text-orange-400">Modbus 工业监控</h1>
       <div class="flex gap-2">
-        <button @click="startPoll" :disabled="store.isPolling" class="flex-1 bg-green-700 py-1.5 rounded text-xs hover:bg-green-600 disabled:opacity-50">
+        <button @click="handleStartPoll" :disabled="store.isPolling" class="flex-1 bg-green-700 py-1.5 rounded text-xs hover:bg-green-600 disabled:opacity-50">
           {{ store.isPolling ? '采集中...' : '开始采集' }}
         </button>
-        <button @click="stopPoll" :disabled="!store.isPolling" class="flex-1 bg-red-700 py-1.5 rounded text-xs hover:bg-red-600 disabled:opacity-50">
+        <button @click="handleStopPoll" :disabled="!store.isPolling" class="flex-1 bg-red-700 py-1.5 rounded text-xs hover:bg-red-600 disabled:opacity-50">
           停止
         </button>
       </div>
@@ -26,7 +26,7 @@
 
       <template v-if="activeTab === 'devices'">
         <h3 class="text-gray-400 text-xs mt-2">设备列表</h3>
-        <div v-for="d in store.devices" :key="d.id" @click="store.selectedDevice = d"
+        <div v-for="d in store.devices" :key="d.id" @click="store.selectDeviceById(d.id)"
           class="bg-gray-800 rounded p-2 cursor-pointer text-sm"
           :class="store.selectedDevice?.id === d.id ? 'ring-1 ring-orange-500' : ''">
           <div class="flex justify-between">
@@ -126,7 +126,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted } from 'vue'
+import { ref, onMounted, onUnmounted, watch } from 'vue'
 import { useModbusStore } from './store/modbus'
 import TrendChart from './components/TrendChart.vue'
 import HealthScorePanel from './components/HealthScorePanel.vue'
@@ -138,25 +138,25 @@ const tabs = [
   { key: 'risk', label: '风险' }
 ]
 const activeTab = ref('devices')
-let timer: number | null = null
 
-function startPoll() {
-  store.isPolling = true
-  timer = window.setInterval(() => store.simulatePoll(), store.pollInterval)
+function handleStartPoll() {
+  store.startPoll()
 }
 
-function stopPoll() {
-  store.isPolling = false
-  if (timer) { clearInterval(timer); timer = null }
+function handleStopPoll() {
+  store.stopPoll()
 }
 
 function goDevice(id: string) {
-  const d = store.devices.find(d => d.id === id)
-  if (d) {
-    store.selectedDevice = d
-    activeTab.value = 'devices'
-  }
+  store.selectDeviceById(id)
+  activeTab.value = 'devices'
 }
+
+watch(() => store.pollInterval, () => {
+  if (store.isPolling) {
+    store.startPoll()
+  }
+})
 
 function getLevelBorderClass(level: DeviceHealthScore['level']): string {
   switch (level) {
@@ -204,5 +204,5 @@ function getScoreTextClass(score: number): string {
 }
 
 onMounted(() => store.initMockDevices())
-onUnmounted(() => stopPoll())
+onUnmounted(() => store.stopPoll())
 </script>

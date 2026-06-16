@@ -1,6 +1,10 @@
-import { ref, computed } from 'vue'
+import { ref, computed, watch } from 'vue'
 import { defineStore } from 'pinia'
-import type { Device, Alarm, ModbusRegister, DeviceHealthScore, HealthRanking, DeviceOnlineStats } from '../types'
+import type { Device, Alarm, ModbusRegister, DeviceHealthScore, HealthRanking, DeviceOnlineStats, HealthScoreSnapshot } from '../types'
+
+const STORAGE_KEY = 'modbus_monitor_state_v1'
+const MAX_SCORE_HISTORY = 50
+const SNAPSHOT_INTERVAL_MS = 10000
 
 export const useModbusStore = defineStore('modbus', () => {
   const devices = ref<Device[]>([])
@@ -10,6 +14,10 @@ export const useModbusStore = defineStore('modbus', () => {
   const pollInterval = ref(1000)
   const selectedDevice = ref<Device | null>(null)
   const onlineStats = ref<Record<string, DeviceOnlineStats>>({})
+  const scoreHistory = ref<HealthScoreSnapshot[]>([])
+  let pollTimer: number | null = null
+  let snapshotTimer: number | null = null
+  let hasInitialized = false
 
   const criticalAlarms = computed(() => alarms.value.filter(a => a.level === 'critical' && !a.acknowledged))
   const onlineDevices = computed(() => devices.value.filter(d => d.online))
@@ -55,6 +63,18 @@ export const useModbusStore = defineStore('modbus', () => {
   })
 
   function calcOnlineRate(deviceId: string, currentOnline: boolean): { onlineRate: number; onlineScore: number } {
+    const stats = onlineStats.value[deviceId]
+    if (!stats || !stats.stateHistory.length) {
+      const rate = currentOnline ? 1 : 0
+      return { onlineRate: rate, onlineScore: Math.round(rate * 40 * 100) / 100 }
+    }
+    const total = stats.stateHistory.length
+    const onlineCount = stats.stateHistory.filter(s => s.online).length
+    const rate = total > 0 ? onlineCount / total : (currentOnline ? 1 : 0)
+    return { onlineRate: rate, onlineScore: Math.round(rate * 40 * 100) / 100 }
+  }
+
+  function recordOnlineState(deviceId: string, online: boolean) {
     if (!onlineStats.value[deviceId]) {
       onlineStats.value[deviceId] = {
         deviceId,
@@ -65,13 +85,8 @@ export const useModbusStore = defineStore('modbus', () => {
       }
     }
     const stats = onlineStats.value[deviceId]
-    const now = Date.now()
-    stats.stateHistory.push({ time: now, online: currentOnline })
+    stats.stateHistory.push({ time: Date.now(), online })
     if (stats.stateHistory.length > 100) stats.stateHistory.shift()
-    const total = stats.stateHistory.length
-    const onlineCount = stats.stateHistory.filter(s => s.online).length
-    const rate = total > 0 ? onlineCount / total : (currentOnline ? 1 : 0)
-    return { onlineRate: rate, onlineScore: Math.round(rate * 40 * 100) / 100 }
   }
 
   function calcAlarmScore(deviceId: string): { alarmWeighted: number; alarmScore: number } {
@@ -155,44 +170,107 @@ export const useModbusStore = defineStore('modbus', () => {
     return suggestions
   }
 
+  function saveState() {
+    try {
+      const state = {
+        devices: devices.value,
+        alarms: alarms.value,
+        historyData: historyData.value,
+        onlineStats: onlineStats.value,
+        selectedDeviceId: selectedDevice.value?.id ?? null,
+        isPolling: isPolling.value,
+        pollInterval: pollInterval.value,
+        scoreHistory: scoreHistory.value
+      }
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(state))
+    } catch (e) {
+      console.warn('Failed to save state to localStorage', e)
+    }
+  }
+
+  function loadState(): boolean {
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY)
+      if (!raw) return false
+      const state = JSON.parse(raw)
+      if (!state.devices || !Array.isArray(state.devices) || state.devices.length === 0) {
+        return false
+      }
+      devices.value = state.devices
+      alarms.value = state.alarms || []
+      historyData.value = state.historyData || {}
+      onlineStats.value = state.onlineStats || {}
+      pollInterval.value = state.pollInterval || 1000
+      scoreHistory.value = state.scoreHistory || []
+      if (state.selectedDeviceId) {
+        const dev = devices.value.find(d => d.id === state.selectedDeviceId)
+        selectedDevice.value = dev || devices.value[0] || null
+      } else {
+        selectedDevice.value = devices.value[0] || null
+      }
+      return true
+    } catch (e) {
+      console.warn('Failed to load state from localStorage', e)
+      return false
+    }
+  }
+
+  function clearPersist() {
+    try {
+      localStorage.removeItem(STORAGE_KEY)
+    } catch (e) {
+      console.warn('Failed to clear state', e)
+    }
+  }
+
   function initMockDevices() {
-    devices.value = [
-      {
-        id: 'dev1', name: '温湿度传感器-A区', ip: '192.168.1.101', port: 502, slaveId: 1, online: true,
-        registers: [
-          { address: 0, name: '温度', type: 'holding', value: 25.6, unit: '°C', updatedAt: Date.now() },
-          { address: 1, name: '湿度', type: 'holding', value: 62.3, unit: '%RH', updatedAt: Date.now() },
-          { address: 2, name: '露点', type: 'holding', value: 17.8, unit: '°C', updatedAt: Date.now() },
-        ]
-      },
-      {
-        id: 'dev2', name: '压力变送器-B区', ip: '192.168.1.102', port: 502, slaveId: 2, online: true,
-        registers: [
-          { address: 0, name: '管道压力', type: 'holding', value: 3.45, unit: 'MPa', updatedAt: Date.now() },
-          { address: 1, name: '差压', type: 'holding', value: 0.12, unit: 'kPa', updatedAt: Date.now() },
-        ]
-      },
-      {
-        id: 'dev3', name: '电机控制器-C区', ip: '192.168.1.103', port: 502, slaveId: 3, online: false,
-        registers: [
-          { address: 0, name: '转速', type: 'holding', value: 1480, unit: 'RPM', updatedAt: Date.now() },
-          { address: 1, name: '电流', type: 'holding', value: 12.5, unit: 'A', updatedAt: Date.now() },
-          { address: 2, name: '运行状态', type: 'coil', value: true, unit: '', updatedAt: Date.now() },
-        ]
-      },
-      {
-        id: 'dev4', name: '流量计-D区', ip: '192.168.1.104', port: 502, slaveId: 4, online: true,
-        registers: [
-          { address: 0, name: '瞬时流量', type: 'holding', value: 156.7, unit: 'L/min', updatedAt: Date.now() },
-          { address: 1, name: '累计流量', type: 'holding', value: 98234, unit: 'L', updatedAt: Date.now() },
-        ]
-      },
-    ]
-    selectedDevice.value = devices.value[0]
+    if (hasInitialized) return
+    const loaded = loadState()
+    if (!loaded) {
+      devices.value = [
+        {
+          id: 'dev1', name: '温湿度传感器-A区', ip: '192.168.1.101', port: 502, slaveId: 1, online: true,
+          registers: [
+            { address: 0, name: '温度', type: 'holding', value: 25.6, unit: '°C', updatedAt: Date.now() },
+            { address: 1, name: '湿度', type: 'holding', value: 62.3, unit: '%RH', updatedAt: Date.now() },
+            { address: 2, name: '露点', type: 'holding', value: 17.8, unit: '°C', updatedAt: Date.now() },
+          ]
+        },
+        {
+          id: 'dev2', name: '压力变送器-B区', ip: '192.168.1.102', port: 502, slaveId: 2, online: true,
+          registers: [
+            { address: 0, name: '管道压力', type: 'holding', value: 3.45, unit: 'MPa', updatedAt: Date.now() },
+            { address: 1, name: '差压', type: 'holding', value: 0.12, unit: 'kPa', updatedAt: Date.now() },
+          ]
+        },
+        {
+          id: 'dev3', name: '电机控制器-C区', ip: '192.168.1.103', port: 502, slaveId: 3, online: false,
+          registers: [
+            { address: 0, name: '转速', type: 'holding', value: 1480, unit: 'RPM', updatedAt: Date.now() },
+            { address: 1, name: '电流', type: 'holding', value: 12.5, unit: 'A', updatedAt: Date.now() },
+            { address: 2, name: '运行状态', type: 'coil', value: true, unit: '', updatedAt: Date.now() },
+          ]
+        },
+        {
+          id: 'dev4', name: '流量计-D区', ip: '192.168.1.104', port: 502, slaveId: 4, online: true,
+          registers: [
+            { address: 0, name: '瞬时流量', type: 'holding', value: 156.7, unit: 'L/min', updatedAt: Date.now() },
+            { address: 1, name: '累计流量', type: 'holding', value: 98234, unit: 'L', updatedAt: Date.now() },
+          ]
+        },
+      ]
+      selectedDevice.value = devices.value[0]
+    }
+    hasInitialized = true
+
+    if (isPolling.value) {
+      startPoll()
+    }
   }
 
   function simulatePoll() {
     for (const dev of devices.value) {
+      recordOnlineState(dev.id, dev.online)
       if (!dev.online) continue
       for (const reg of dev.registers) {
         if (typeof reg.value === 'number') {
@@ -207,10 +285,10 @@ export const useModbusStore = defineStore('modbus', () => {
             historyData.value[key].time.shift()
             historyData.value[key].values.shift()
           }
-          // Check thresholds
           if (reg.name === '温度' && reg.value > 28) {
             alarms.value.unshift({
-              id: `a_${Date.now()}`, deviceId: dev.id, register: reg.name,
+              id: `a_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+              deviceId: dev.id, register: reg.name,
               message: `${dev.name} ${reg.name}超限: ${reg.value}${reg.unit}`,
               level: reg.value > 30 ? 'critical' : 'warning',
               timestamp: Date.now(), acknowledged: false
@@ -220,6 +298,45 @@ export const useModbusStore = defineStore('modbus', () => {
       }
     }
     if (alarms.value.length > 50) alarms.value = alarms.value.slice(0, 50)
+    syncSelectedDeviceRef()
+  }
+
+  function takeScoreSnapshot() {
+    if (!healthRanking.value) return
+    const snapshot: HealthScoreSnapshot = {
+      timestamp: Date.now(),
+      ranking: JSON.parse(JSON.stringify(healthRanking.value.ranking)),
+      overallAverageScore: healthRanking.value.overallAverageScore,
+      totalDevices: healthRanking.value.totalDevices,
+      criticalCount: healthRanking.value.criticalCount,
+      poorCount: healthRanking.value.poorCount
+    }
+    scoreHistory.value.unshift(snapshot)
+    if (scoreHistory.value.length > MAX_SCORE_HISTORY) {
+      scoreHistory.value.pop()
+    }
+  }
+
+  function syncSelectedDeviceRef() {
+    if (!selectedDevice.value) return
+    const dev = devices.value.find(d => d.id === selectedDevice.value!.id)
+    if (dev && dev !== selectedDevice.value) {
+      selectedDevice.value = dev
+    }
+  }
+
+  function startPoll() {
+    if (pollTimer) clearInterval(pollTimer)
+    if (snapshotTimer) clearInterval(snapshotTimer)
+    isPolling.value = true
+    pollTimer = window.setInterval(() => simulatePoll(), pollInterval.value)
+    snapshotTimer = window.setInterval(() => takeScoreSnapshot(), SNAPSHOT_INTERVAL_MS)
+  }
+
+  function stopPoll() {
+    isPolling.value = false
+    if (pollTimer) { clearInterval(pollTimer); pollTimer = null }
+    if (snapshotTimer) { clearInterval(snapshotTimer); snapshotTimer = null }
   }
 
   function acknowledgeAlarm(id: string) {
@@ -232,9 +349,21 @@ export const useModbusStore = defineStore('modbus', () => {
     if (d) d.online = !d.online
   }
 
+  function selectDeviceById(id: string) {
+    const dev = devices.value.find(d => d.id === id)
+    if (dev) selectedDevice.value = dev
+  }
+
+  watch([devices, alarms, historyData, onlineStats, selectedDevice, isPolling, pollInterval, scoreHistory], () => {
+    if (hasInitialized) {
+      saveState()
+    }
+  }, { deep: true })
+
   return {
-    devices, alarms, historyData, isPolling, pollInterval, selectedDevice, onlineStats,
+    devices, alarms, historyData, isPolling, pollInterval, selectedDevice, onlineStats, scoreHistory,
     criticalAlarms, onlineDevices, healthRanking,
-    initMockDevices, simulatePoll, acknowledgeAlarm, toggleDevice
+    initMockDevices, simulatePoll, startPoll, stopPoll, acknowledgeAlarm, toggleDevice,
+    selectDeviceById, saveState, loadState, clearPersist
   }
 })

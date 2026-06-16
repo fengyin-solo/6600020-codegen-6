@@ -61,3 +61,23 @@ export interface DeviceOnlineStats {
   lastOnlineTime: number | null
   stateHistory: { time: number; online: boolean }[]
 }
+
+export interface HealthScoreSnapshot {
+  timestamp: number
+  ranking: DeviceHealthScore[]
+  overallAverageScore: number
+  totalDevices: number
+  criticalCount: number
+  poorCount: number
+}
+
+export interface PersistState {
+  devices: Device[]
+  alarms: Alarm[]
+  historyData: Record<string, { time: number[]; values: number[] }>
+  onlineStats: Record<string, DeviceOnlineStats>
+  selectedDeviceId: string | null
+  isPolling: boolean
+  pollInterval: number
+  scoreHistory: HealthScoreSnapshot[]
+}
