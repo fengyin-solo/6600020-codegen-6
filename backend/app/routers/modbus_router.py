@@ -1,5 +1,6 @@
 from fastapi import APIRouter
-from app.services.modbus_service import read_registers, get_device_status
+from app.services.modbus_service import read_registers, get_device_status, calculate_health_scores
+from app.models.schemas import HealthRankingResponse
 
 router = APIRouter()
 
@@ -15,3 +16,8 @@ def read_holding(device_id: str, address: int, count: int = 1):
 @router.post("/modbus/write/{device_id}/{address}")
 def write_register(device_id: str, address: int, value: int):
     return {"device_id": device_id, "address": address, "value": value, "status": "written"}
+
+@router.get("/health/scores", response_model=HealthRankingResponse)
+def get_health_scores():
+    """获取所有设备健康评分及风险排序"""
+    return calculate_health_scores()
